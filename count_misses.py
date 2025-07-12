@@ -3,6 +3,8 @@ import trimesh
 import open3d as o3d
 from scipy import ndimage
 from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
+import matplotlib.pyplot as plt
 
 import os
 import json
@@ -31,6 +33,8 @@ blades_normals = [[] for _ in range(len(drill_bit_info.values()))]
 
 plane_meshes = []
 
+clustering_min_samples = 2
+
 for index, value in enumerate(drill_bit_info.values()):
     blades_submeshes[index] = []
     for cluster in value["clusters"]:
@@ -57,16 +61,23 @@ def estimate_angle(normal_vector):
     n_unit = normal_vector / np.linalg.norm(normal_vector)
     z_axis = np.array([0.0, 0.0, 1.0])
     y_axis = np.array([0.0, 1.0, 0.0])
+    x_axis = np.array([1.0, 0.0, 0.0])
 
-    cos_theta_z = np.clip(n_unit.dot(z_axis), -1.0, 1.0)
+    cos_theta_z = np.clip(abs(n_unit.dot(z_axis)), -1.0, 1.0)
     theta_rad_z = np.arccos(cos_theta_z)
     theta_deg_z = np.degrees(theta_rad_z)
 
-    cos_theta_y = np.clip(n_unit.dot(y_axis), -1.0, 1.0)
+    cos_theta_y = np.clip(abs(n_unit.dot(y_axis)), -1.0, 1.0)
     theta_rad_y = np.arccos(cos_theta_y)
     theta_deg_y = np.degrees(theta_rad_y)
 
-    return np.array([np.ceil(theta_deg_z), np.ceil(theta_deg_y)])
+    cos_theta_x = np.clip(abs(n_unit.dot(x_axis)), -1.0, 1.0)
+    theta_rad_x = np.arccos(cos_theta_x)
+    theta_deg_x = np.degrees(theta_rad_x)
+
+    angles = np.array([theta_deg_z, theta_deg_y, theta_deg_x])
+
+    return angles.astype(int)
 
 
 def erode_cutter(submesh_index, drill_pts, voxel_size=0.001):
@@ -134,11 +145,47 @@ def construct_plane(inlier_pts, normal, outlier=False):
     if outlier:
         color = [1, 0, 0]
     else:
-        color = [0.7, 0.7, 0.7]
+        color = [0, 1, 0]
 
     mesh_plane.paint_uniform_color(color)
 
     plane_meshes.append(mesh_plane)
+
+
+def compute_k_distances(min_samples, normals_unit):
+    k = min_samples
+    nbrs = NearestNeighbors(n_neighbors=k, metric="cosine").fit(normals_unit)
+    dists, _ = nbrs.kneighbors(normals_unit)
+    k_distances = dists[:, k - 1]
+    k_distances_sorted = np.sort(k_distances)
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(k_distances_sorted, marker=".", linestyle="none")
+    plt.xlabel("Points sorted by distance to their k-th neighbor")
+    plt.ylabel(f"Cosine-distance to {k}th NN")
+    plt.title(f"k-distance plot (k={k})")
+    plt.grid(True)
+    plt.show()
+
+
+def cluster_normals(blade_normals):
+    normals = np.array(blade_normals)
+    normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+
+    flip_mask = normals_unit[:, 2] < 0
+    normals_unit[flip_mask] *= -1
+
+    # compute_k_distances(clustering_min_samples, normals_unit)
+
+    max_angle_deg = 40
+    eps = 1 - np.cos(np.deg2rad(max_angle_deg))
+    cl = DBSCAN(eps=eps, min_samples=clustering_min_samples, metric="cosine").fit(
+        normals_unit
+    )
+    labels = cl.labels_
+    outliers_mask = labels == -1
+
+    return outliers_mask
 
 
 if __name__ == "__main__":
@@ -151,17 +198,15 @@ if __name__ == "__main__":
             blades_inlier_pts[index].append(inlier_pts)
             blades_normals[index].append(normal)
 
-    for blade_index, blade in enumerate(blades_angles):
-        X = np.array(blade)
-        cl = DBSCAN(eps=20.0, min_samples=2).fit(X)
-        outliers_mask = cl.labels_ == -1
-        print(np.where(cl.labels_ == -1)[0])
-        for cutter_index, cutter in enumerate(blade):
+    for blade_index, blade_normals in enumerate(blades_normals):
+        outliers_mask = cluster_normals(blade_normals)
+        for cutter_index in range(len(blade_normals)):
             construct_plane(
                 blades_inlier_pts[blade_index][cutter_index],
                 blades_normals[blade_index][cutter_index],
                 outliers_mask[cutter_index],
             )
+
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name="All Segmented Planes")
     vis.add_geometry(drill_bit_mesh)
