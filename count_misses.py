@@ -3,8 +3,6 @@ import trimesh
 import open3d as o3d
 from scipy import ndimage
 from sklearn.cluster import DBSCAN
-from sklearn.neighbors import NearestNeighbors
-import matplotlib.pyplot as plt
 
 import os
 import json
@@ -117,6 +115,7 @@ def erode_cutter(submesh_index, drill_pts, voxel_size=0.001):
 
 def construct_plane(inlier_pts, normal, outlier=False):
     point0 = inlier_pts.mean(axis=0)
+    a = normal[0]
 
     arbitrary = np.array([1, 0, 0]) if abs(a) < 0.9 else np.array([0, 1, 0])
     v1 = np.cross(normal, arbitrary)
@@ -151,41 +150,23 @@ def construct_plane(inlier_pts, normal, outlier=False):
 
     plane_meshes.append(mesh_plane)
 
-
-def compute_k_distances(min_samples, normals_unit):
-    k = min_samples
-    nbrs = NearestNeighbors(n_neighbors=k, metric="cosine").fit(normals_unit)
-    dists, _ = nbrs.kneighbors(normals_unit)
-    k_distances = dists[:, k - 1]
-    k_distances_sorted = np.sort(k_distances)
-
-    plt.figure(figsize=(6, 4))
-    plt.plot(k_distances_sorted, marker=".", linestyle="none")
-    plt.xlabel("Points sorted by distance to their k-th neighbor")
-    plt.ylabel(f"Cosine-distance to {k}th NN")
-    plt.title(f"k-distance plot (k={k})")
-    plt.grid(True)
-    plt.show()
-
-
-def cluster_normals(blade_normals):
-    normals = np.array(blade_normals)
+def cluster_normals(blade_normals, clustering_min_samples=2):
+    normals = np.array(blade_normals, dtype=float)
     normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
 
-    flip_mask = normals_unit[:, 2] < 0
-    normals_unit[flip_mask] *= -1
+    ref = normals_unit.mean(axis=0)
+    ref /= np.linalg.norm(ref)
 
-    # compute_k_distances(clustering_min_samples, normals_unit)
+    dots = normals_unit.dot(ref)
+    normals_unit[dots < 0] *= -1
 
-    max_angle_deg = 40
+    max_angle_deg = 25
     eps = 1 - np.cos(np.deg2rad(max_angle_deg))
     cl = DBSCAN(eps=eps, min_samples=clustering_min_samples, metric="cosine").fit(
         normals_unit
     )
-    labels = cl.labels_
-    outliers_mask = labels == -1
 
-    return outliers_mask
+    return cl.labels_ == -1
 
 
 if __name__ == "__main__":
@@ -215,6 +196,10 @@ if __name__ == "__main__":
 
     opt = vis.get_render_option()
     opt.mesh_show_back_face = True
+
+    for i in range(len(blades_normals)):
+        print(f"Pairwise angles for blade index {i}")
+        print_pairwise_normal_angles(blades_normals[i])
 
     vis.run()
     vis.destroy_window()
