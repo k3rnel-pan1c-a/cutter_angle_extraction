@@ -5,6 +5,42 @@ import trimesh
 import open3d as o3d
 import os
 
+best_fit_contours = []
+
+
+def construct_plane(inlier_pts, normal):
+    point0 = inlier_pts.mean(axis=0)
+    a = normal[0]
+
+    arbitrary = np.array([1, 0, 0]) if abs(a) < 0.9 else np.array([0, 1, 0])
+    v1 = np.cross(normal, arbitrary)
+    v1 /= np.linalg.norm(v1)
+    v2 = np.cross(normal, v1)
+    v2 /= np.linalg.norm(v2)
+
+    rel = inlier_pts - point0
+    proj1 = rel.dot(v1)
+    proj2 = rel.dot(v2)
+    size1 = (proj1.max() - proj1.min()) * 1.1  # 10% padding
+    size2 = (proj2.max() - proj2.min()) * 1.1
+
+    corners = [
+        point0 + v1 * (size1 / 2) + v2 * (size2 / 2),
+        point0 + v1 * (size1 / 2) - v2 * (size2 / 2),
+        point0 - v1 * (size1 / 2) - v2 * (size2 / 2),
+        point0 - v1 * (size1 / 2) + v2 * (size2 / 2),
+    ]
+
+    mesh_plane = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(corners),
+        triangles=o3d.utility.Vector3iVector([[0, 1, 2], [2, 3, 0]]),
+    )
+    mesh_plane.compute_vertex_normals()
+
+    mesh_plane.paint_uniform_color([0, 1, 0])
+
+    return mesh_plane
+
 
 def ransac_plane_circle_detection_and_visualization(
     pts, distance_thresh=0.001, iterations=100, min_inliers=100, img_scale=600
@@ -28,6 +64,8 @@ def ransac_plane_circle_detection_and_visualization(
         if len(inliers_idx) < min_inliers:
             continue
         inlier_pts = pts[inliers_idx]
+
+        # mesh_plane = construct_plane(inlier_pts, normal)
 
         point0 = inlier_pts.mean(axis=0)
         arbitrary = np.array([1, 0, 0]) if abs(normal[0]) < 0.9 else np.array([0, 1, 0])
@@ -88,12 +126,40 @@ def ransac_plane_circle_detection_and_visualization(
 
         binary = cv2.bitwise_not(img)
 
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        contours = sorted(contours, key=lambda c: cv2.contourArea(c), reverse=True)
-        # convexHull = cv2.convexHull(contours[0])
-        # cv2.drawContours(img, [convexHull], -1, (100, 0, 0), 1)
+        contours, hiearchies = cv2.findContours(
+            binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+        )
+        hiearchies = hiearchies[0]
 
-        cv2.drawContours(img, [contours[0]], -1, 200, 1)
+        solid_contours = []
+
+        for index, contour in enumerate(contours):
+            next_i, prev_i, first_child, parent = hiearchies[index]
+            if parent >= 0:
+                continue
+
+            area_outer = cv2.contourArea(contour)
+
+            area_holes = 0
+            child = first_child
+            while child != -1:
+                area_holes += cv2.contourArea(contours[child])
+                child = hiearchies[child][0]
+
+            net_area = area_outer - area_holes
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+
+            solidity = net_area / hull_area if hull_area > 0 else 0
+
+            if solidity > 0.9:
+                solid_contours.append([contour, net_area])
+
+        if solid_contours:
+            max_area = max(solid_contours, key=lambda c: c[1])
+            # solid_contours = sorted(solid_contours, key=lambda c: c[1], reverse=True)
+            cv2.drawContours(img, [max_area[0]], -1, (128, 0, 0), 1)
+            best_fit_contours.append([max_area[0], inlier_pts, normal])
 
         big = cv2.resize(img, (W * 16, H * 16), interpolation=cv2.INTER_NEAREST)
         cv2.imshow(f"2D Iter {it}", big)
@@ -107,6 +173,26 @@ if __name__ == "__main__":
     drill_pts = np.asarray(
         o3d.io.read_point_cloud(os.path.join(base_dir, "med_scaled.ply")).points
     )
-    inside_mask = mesh.split()[5].contains(drill_pts)
+    inside_mask = mesh.split()[6].contains(drill_pts)
     inside_pts = drill_pts[inside_mask]
     ransac_plane_circle_detection_and_visualization(inside_pts)
+
+    best_fit_contour = max(best_fit_contours, key=lambda c: cv2.contourArea(c[0]))
+    contour, inlier_pts, normal = best_fit_contour
+    mesh_plane = construct_plane(inlier_pts, normal)
+
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inside_pts))
+    pcd.paint_uniform_color([0.7, 0.7, 0.7])
+    inlier_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inlier_pts))
+    inlier_pcd.paint_uniform_color([1, 0, 0])
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="Best fit plane", width=800, height=600)
+    vis.add_geometry(pcd)
+    vis.add_geometry(inlier_pcd)
+    vis.add_geometry(mesh_plane)
+
+    opt = vis.get_render_option()
+    opt.mesh_show_back_face = True
+    vis.run()
+    vis.destroy_window()
