@@ -129,39 +129,31 @@ def ransac_plane_circle_detection_and_visualization(
         contours, hiearchies = cv2.findContours(
             binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
         )
+        if hiearchies is None:
+            continue
+
         hiearchies = hiearchies[0]
 
         solid_contours = []
+        for idx, contour in enumerate(contours):
+            next_i, prev_i, first_child, parent = hiearchies[idx]
 
-        for index, contour in enumerate(contours):
-            next_i, prev_i, first_child, parent = hiearchies[index]
-            if parent >= 0:
+            if parent != -1 or first_child != -1:
                 continue
 
-            area_outer = cv2.contourArea(contour)
-
-            area_holes = 0
-            child = first_child
-            while child != -1:
-                area_holes += cv2.contourArea(contours[child])
-                child = hiearchies[child][0]
-
-            net_area = area_outer - area_holes
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-
-            solidity = net_area / hull_area if hull_area > 0 else 0
-
-            if solidity > 0.9:
-                solid_contours.append([contour, net_area])
+            solid_contours.append(contour)
 
         if solid_contours:
-            max_area = max(solid_contours, key=lambda c: c[1])
-            # solid_contours = sorted(solid_contours, key=lambda c: c[1], reverse=True)
-            cv2.drawContours(img, [max_area[0]], -1, (128, 0, 0), 1)
-            best_fit_contours.append([max_area[0], inlier_pts, normal])
+            areas = [cv2.contourArea(c) for c in solid_contours]
+            biggest = solid_contours[int(np.argmax(areas))]
+            cv2.drawContours(img, [biggest], -1, (128, 0, 0), 1)
+            best_fit_contours.append([biggest, inlier_pts, normal])
 
-        big = cv2.resize(img, (W * 16, H * 16), interpolation=cv2.INTER_NEAREST)
+        big = cv2.resize(
+            img,
+            (W * 16, H * 16),
+            interpolation=cv2.INTER_NEAREST,
+        )
         cv2.imshow(f"2D Iter {it}", big)
         if cv2.waitKey(0) & 0xFF == ord("q"):
             cv2.destroyWindow(f"2D Iter {it}")
