@@ -104,7 +104,12 @@ def ransac_plane_circle_detection_and_visualization(
             if parent != -1 or first_child != -1:
                 continue
 
-            solid_contours.append(contour)
+            convex_hull = cv2.convexHull(contour)
+            contour_area = cv2.contourArea(contour)
+            hull_area = cv2.contourArea(convex_hull)
+
+            if hull_area > 0 and contour_area / hull_area > 0.8:
+                solid_contours.append(contour)
 
         if solid_contours:
             areas = [cv2.contourArea(c) for c in solid_contours]
@@ -112,14 +117,13 @@ def ransac_plane_circle_detection_and_visualization(
             best_fit_contours.append([biggest, inlier_pts, normal])
 
 
-
 if __name__ == "__main__":
-    base_dir = "../dataset/exported_blades_v3/01_02_2024_08_31"
+    base_dir = "../dataset/exported_blades_v3/01_02_2024_09_27"
     mesh = trimesh.load_mesh(os.path.join(base_dir, "merged_blade_mapping_big.obj"))
     drill_pts = np.asarray(
         o3d.io.read_point_cloud(os.path.join(base_dir, "med_scaled.ply")).points
     )
-    inside_mask = mesh.split()[0].contains(drill_pts)
+    inside_mask = mesh.split()[3].contains(drill_pts)
     inside_pts = drill_pts[inside_mask]
     ransac_plane_circle_detection_and_visualization(inside_pts)
 
@@ -142,4 +146,3 @@ if __name__ == "__main__":
     opt.mesh_show_back_face = True
     vis.run()
     vis.destroy_window()
-
