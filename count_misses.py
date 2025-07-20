@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 import trimesh
 import open3d as o3d
 from scipy import ndimage
@@ -6,8 +7,10 @@ from sklearn.cluster import DBSCAN
 
 import os
 import json
+import random
+from collections import Counter
 
-base_dir = "../dataset/exported_blades_v3/01_02_2024_08_31"
+base_dir = "../dataset/exported_blades_v3/04_02_2024_15_40"
 spheres_mesh_path = os.path.join(base_dir, "merged_blade_mapping_big.obj")
 drill_bit_info = json.load(open(f"{base_dir}/full_drillbit.json"))
 
@@ -31,7 +34,8 @@ blades_normals = [[] for _ in range(len(drill_bit_info.values()))]
 
 plane_meshes = []
 
-clustering_min_samples = 2
+
+clustering_min_samples = 3
 
 for index, value in enumerate(drill_bit_info.values()):
     blades_submeshes[index] = []
@@ -53,6 +57,84 @@ def run_ransac(eroded_points):
     )
 
     return plane_model, inliers
+
+
+def ransac_plane_circle_detection_and_visualization(
+    pts, distance_thresh=0.001, iterations=2000, min_inliers=100, img_scale=600
+):
+    N = pts.shape[0]
+    best_fit_contours = []
+
+    for it in range(iterations):
+        idx = random.sample(range(N), 3)
+        p0, p1, p2 = pts[idx]
+
+        v1_3d = p1 - p0
+        v2_3d = p2 - p0
+        normal = np.cross(v1_3d, v2_3d)
+        if np.linalg.norm(normal) < 1e-6:
+            continue
+        normal /= np.linalg.norm(normal)
+        d = -normal.dot(p0)
+
+        dist = np.abs(pts.dot(normal) + d)
+        inliers_idx = np.where(dist < distance_thresh)[0]
+        if len(inliers_idx) < min_inliers:
+            continue
+        inlier_pts = pts[inliers_idx]
+
+        point0 = inlier_pts.mean(axis=0)
+        arbitrary = np.array([1, 0, 0]) if abs(normal[0]) < 0.9 else np.array([0, 1, 0])
+        v1 = np.cross(normal, arbitrary)
+        v1 /= np.linalg.norm(v1)
+        v2 = np.cross(normal, v1)
+        v2 /= np.linalg.norm(v2)
+
+        u, v = v1, v2
+        coords = np.vstack(
+            [(inlier_pts - point0).dot(u), (inlier_pts - point0).dot(v)]
+        ).T
+        xs, ys = coords[:, 0], coords[:, 1]
+        xmin, xmax, ymin, ymax = xs.min(), xs.max(), ys.min(), ys.max()
+        W = int(np.ceil((xmax - xmin) * img_scale)) + 10
+        H = int(np.ceil((ymax - ymin) * img_scale)) + 10
+        img = np.ones((H, W), dtype=np.uint8) * 255
+        for x, y in zip(xs, ys):
+            ix = int((x - xmin) * img_scale)
+            iy = int((y - ymin) * img_scale)
+            if 0 <= ix < W and 0 <= iy < H:
+                img[iy + 5, ix + 5] = 0
+
+        binary = cv2.bitwise_not(img)
+
+        contours, hiearchies = cv2.findContours(
+            binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+        )
+        if len(contours) > 1 or hiearchies is None:
+            continue
+
+        hiearchies = hiearchies[0]
+
+        solid_contours = []
+        for idx, contour in enumerate(contours):
+            next_i, prev_i, first_child, parent = hiearchies[idx]
+
+            if parent != -1 or first_child != -1:
+                continue
+
+            convex_hull = cv2.convexHull(contour)
+            contour_area = cv2.contourArea(contour)
+            hull_area = cv2.contourArea(convex_hull)
+
+            if hull_area > 0 and contour_area / hull_area > 0.8:
+                solid_contours.append(contour)
+
+        if solid_contours:
+            areas = [cv2.contourArea(c) for c in solid_contours]
+            biggest = solid_contours[int(np.argmax(areas))]
+            best_fit_contours.append([biggest, inlier_pts, normal])
+
+    return best_fit_contours
 
 
 def estimate_angle(normal_vector):
@@ -150,6 +232,19 @@ def construct_plane(inlier_pts, normal, outlier=False):
 
     plane_meshes.append(mesh_plane)
 
+
+def print_pairwise_normal_angles(blade_normals):
+    normals = np.array(blade_normals, dtype=float)
+    normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+
+    n = normals_unit.shape[0]
+    for i in range(n):
+        for j in range(i + 1, n):
+            cos_ij = np.clip(abs(normals_unit[i].dot(normals_unit[j])), -1.0, 1.0)
+            angle_deg = np.degrees(np.arccos(cos_ij))
+            print(f"Angle between normal {i} and {j}: {angle_deg:.2f}°")
+
+
 def cluster_normals(blade_normals, clustering_min_samples=2):
     normals = np.array(blade_normals, dtype=float)
     normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
@@ -166,21 +261,34 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
         normals_unit
     )
 
-    return cl.labels_ == -1
+    labels = np.array(cl.labels_)
+    counts = Counter(labels[labels >= 0])
+    largest_label, _ = counts.most_common(1)[0]
+
+    outliers = labels == -1
+
+    return outliers
 
 
 if __name__ == "__main__":
     for index, blade in enumerate(blades_submeshes):
         for submesh in blade:
-            plane_model, inlier_pts = erode_cutter(submesh, drill_pts)
-            a, b, c, _ = plane_model
-            normal = np.array([a, b, c])
+            inside_mask = submeshes[submesh].contains(drill_pts)
+            inside_points = drill_pts[inside_mask]
+
+            results = ransac_plane_circle_detection_and_visualization(inside_points)
+            if not results:
+                continue
+
+            contour, inlier_points, normal = max(
+                results, key=lambda x: cv2.contourArea(x[0])
+            )
             blades_angles[index].append(estimate_angle(normal))
-            blades_inlier_pts[index].append(inlier_pts)
+            blades_inlier_pts[index].append(inlier_points)
             blades_normals[index].append(normal)
 
     for blade_index, blade_normals in enumerate(blades_normals):
-        outliers_mask = cluster_normals(blade_normals)
+        outliers_mask = cluster_normals(blade_normals, clustering_min_samples)
         for cutter_index in range(len(blade_normals)):
             construct_plane(
                 blades_inlier_pts[blade_index][cutter_index],
@@ -196,10 +304,6 @@ if __name__ == "__main__":
 
     opt = vis.get_render_option()
     opt.mesh_show_back_face = True
-
-    for i in range(len(blades_normals)):
-        print(f"Pairwise angles for blade index {i}")
-        print_pairwise_normal_angles(blades_normals[i])
 
     vis.run()
     vis.destroy_window()
