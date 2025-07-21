@@ -10,7 +10,7 @@ import json
 import random
 from collections import Counter
 
-base_dir = "../dataset/exported_blades_v3/04_02_2024_15_40"
+base_dir = "../dataset/exported_blades_v3/01_02_2024_10_28"
 spheres_mesh_path = os.path.join(base_dir, "merged_blade_mapping_big.obj")
 drill_bit_info = json.load(open(f"{base_dir}/full_drillbit.json"))
 
@@ -62,6 +62,8 @@ def run_ransac(eroded_points):
 def ransac_plane_circle_detection_and_visualization(
     pts, distance_thresh=0.001, iterations=2000, min_inliers=100, img_scale=600
 ):
+    distance_thresh *= 0.5
+
     N = pts.shape[0]
     best_fit_contours = []
 
@@ -106,33 +108,29 @@ def ransac_plane_circle_detection_and_visualization(
                 img[iy + 5, ix + 5] = 0
 
         binary = cv2.bitwise_not(img)
+        nonzero = cv2.findNonZero(binary)
+        if nonzero is None or len(nonzero) < 3:
+            continue
+        pts_px = nonzero.reshape(-1, 2)
+        black_area = pts_px.shape[0]
+
+        hull = cv2.convexHull(pts_px)
+        hull_area = cv2.contourArea(hull)
+
+        ratio = black_area / hull_area if hull_area > 0 else 0
+        if hull_area == 0 or ratio < 0.75:
+            continue
 
         contours, hiearchies = cv2.findContours(
-            binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
-        if len(contours) > 1 or hiearchies is None:
+        if hiearchies is None:
             continue
 
         hiearchies = hiearchies[0]
 
-        solid_contours = []
-        for idx, contour in enumerate(contours):
-            next_i, prev_i, first_child, parent = hiearchies[idx]
-
-            if parent != -1 or first_child != -1:
-                continue
-
-            convex_hull = cv2.convexHull(contour)
-            contour_area = cv2.contourArea(contour)
-            hull_area = cv2.contourArea(convex_hull)
-
-            if hull_area > 0 and contour_area / hull_area > 0.8:
-                solid_contours.append(contour)
-
-        if solid_contours:
-            areas = [cv2.contourArea(c) for c in solid_contours]
-            biggest = solid_contours[int(np.argmax(areas))]
-            best_fit_contours.append([biggest, inlier_pts, normal])
+        if contours:
+            best_fit_contours.append([hull, inlier_pts, normal])
 
     return best_fit_contours
 
@@ -262,8 +260,8 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
     )
 
     labels = np.array(cl.labels_)
-    counts = Counter(labels[labels >= 0])
-    largest_label, _ = counts.most_common(1)[0]
+    # counts = Counter(labels[labels >= 0])
+    # largest_label, _ = counts.most_common(1)[0]
 
     outliers = labels == -1
 
@@ -280,7 +278,7 @@ if __name__ == "__main__":
             if not results:
                 continue
 
-            contour, inlier_points, normal = max(
+            hull, inlier_points, normal = max(
                 results, key=lambda x: cv2.contourArea(x[0])
             )
             blades_angles[index].append(estimate_angle(normal))
