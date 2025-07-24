@@ -10,7 +10,7 @@ import json
 import random
 from collections import Counter
 
-base_dir = "../dataset/exported_blades_v3/01_02_2024_10_28"
+base_dir = "../dataset/exported_blades_v3/01_02_2024_09_15"
 spheres_mesh_path = os.path.join(base_dir, "merged_blade_mapping_big.obj")
 drill_bit_info = json.load(open(f"{base_dir}/full_drillbit.json"))
 
@@ -28,14 +28,13 @@ drill_bit_mesh.compute_vertex_normals()
 drill_pts = np.asarray(drill_bit_pcd.points, dtype=np.float32)
 
 blades_submeshes = [[] for _ in range(len(drill_bit_info.values()))]
-blades_angles = [[] for _ in range(len(drill_bit_info.values()))]
 blades_inlier_pts = [[] for _ in range(len(drill_bit_info.values()))]
 blades_normals = [[] for _ in range(len(drill_bit_info.values()))]
 
 plane_meshes = []
 
 
-clustering_min_samples = 3
+clustering_min_samples = 2
 
 for index, value in enumerate(drill_bit_info.values()):
     blades_submeshes[index] = []
@@ -60,7 +59,13 @@ def run_ransac(eroded_points):
 
 
 def ransac_plane_circle_detection_and_visualization(
-    pts, distance_thresh=0.001, iterations=2000, min_inliers=100, img_scale=600
+    pts,
+    distance_thresh=0.001,
+    iterations=2000,
+    min_inliers=100,
+    img_scale=600,
+    median_angles=None,
+    angle_threshold_deg=30,
 ):
     distance_thresh *= 0.5
 
@@ -77,6 +82,12 @@ def ransac_plane_circle_detection_and_visualization(
         if np.linalg.norm(normal) < 1e-6:
             continue
         normal /= np.linalg.norm(normal)
+
+        if median_angles is not None:
+            ang = estimate_angle(normal)
+            if np.any(np.abs(ang - median_angles) > angle_threshold_deg):
+                continue
+
         d = -normal.dot(p0)
 
         dist = np.abs(pts.dot(normal) + d)
@@ -136,20 +147,19 @@ def ransac_plane_circle_detection_and_visualization(
 
 
 def estimate_angle(normal_vector):
-    n_unit = normal_vector / np.linalg.norm(normal_vector)
     z_axis = np.array([0.0, 0.0, 1.0])
     y_axis = np.array([0.0, 1.0, 0.0])
     x_axis = np.array([1.0, 0.0, 0.0])
 
-    cos_theta_z = np.clip(abs(n_unit.dot(z_axis)), -1.0, 1.0)
+    cos_theta_z = np.clip(abs(normal_vector.dot(z_axis)), -1.0, 1.0)
     theta_rad_z = np.arccos(cos_theta_z)
     theta_deg_z = np.degrees(theta_rad_z)
 
-    cos_theta_y = np.clip(abs(n_unit.dot(y_axis)), -1.0, 1.0)
+    cos_theta_y = np.clip(abs(normal_vector.dot(y_axis)), -1.0, 1.0)
     theta_rad_y = np.arccos(cos_theta_y)
     theta_deg_y = np.degrees(theta_rad_y)
 
-    cos_theta_x = np.clip(abs(n_unit.dot(x_axis)), -1.0, 1.0)
+    cos_theta_x = np.clip(abs(normal_vector.dot(x_axis)), -1.0, 1.0)
     theta_rad_x = np.arccos(cos_theta_x)
     theta_deg_x = np.degrees(theta_rad_x)
 
@@ -260,16 +270,16 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
     )
 
     labels = np.array(cl.labels_)
-    # counts = Counter(labels[labels >= 0])
-    # largest_label, _ = counts.most_common(1)[0]
 
     outliers = labels == -1
 
-    return outliers
+    return outliers, normals_unit
 
 
 if __name__ == "__main__":
     for index, blade in enumerate(blades_submeshes):
+        # if index != 1:
+        #     continue
         for submesh in blade:
             inside_mask = submeshes[submesh].contains(drill_pts)
             inside_points = drill_pts[inside_mask]
@@ -281,18 +291,53 @@ if __name__ == "__main__":
             hull, inlier_points, normal = max(
                 results, key=lambda x: cv2.contourArea(x[0])
             )
-            blades_angles[index].append(estimate_angle(normal))
             blades_inlier_pts[index].append(inlier_points)
             blades_normals[index].append(normal)
 
     for blade_index, blade_normals in enumerate(blades_normals):
-        outliers_mask = cluster_normals(blade_normals, clustering_min_samples)
+        # if blade_index != 1:
+        #     continue
+        outliers_mask, normals_unit = cluster_normals(
+            blade_normals, clustering_min_samples
+        )
+        outlier_indices = np.where(outliers_mask)[0]
+        print(outlier_indices)
+
+        if len(outlier_indices):
+            inlier_indices = np.where(outliers_mask ^ 1)[0]
+            inlier_angles = []
+
+            for index in inlier_indices:
+                inlier_angles.append(estimate_angle(normals_unit[index]))
+            median_angles = np.mean(inlier_angles, axis=0)
+
+            for index in outlier_indices:
+                submesh = blades_submeshes[blade_index][index]
+                inside_mask = submeshes[submesh].contains(drill_pts)
+                inside_points = drill_pts[inside_mask]
+                results = ransac_plane_circle_detection_and_visualization(
+                    inside_points, median_angles=median_angles
+                )
+
+                if not results:
+                    print("No results for outliers")
+                    continue
+
+                hull, inlier_points, normal = max(
+                    results, key=lambda x: cv2.contourArea(x[0])
+                )
+                print(estimate_angle(normal))
+                blades_inlier_pts[blade_index][index] = inlier_points
+                blades_normals[blade_index][index] = normal
+
         for cutter_index in range(len(blade_normals)):
             construct_plane(
                 blades_inlier_pts[blade_index][cutter_index],
                 blades_normals[blade_index][cutter_index],
                 outliers_mask[cutter_index],
             )
+
+    print(print_pairwise_normal_angles(blades_normals[1]))
 
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name="All Segmented Planes")
