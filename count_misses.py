@@ -8,7 +8,6 @@ from sklearn.cluster import DBSCAN
 import os
 import json
 import random
-from collections import Counter
 
 base_dir = "../dataset/exported_blades_v3/01_02_2024_09_15"
 spheres_mesh_path = os.path.join(base_dir, "merged_blade_mapping_big.obj")
@@ -64,8 +63,8 @@ def ransac_plane_circle_detection_and_visualization(
     iterations=2000,
     min_inliers=100,
     img_scale=600,
-    median_angles=None,
-    angle_threshold_deg=30,
+    median_normal=None,
+    angle_threshold_deg=35,
 ):
     distance_thresh *= 0.5
 
@@ -83,9 +82,8 @@ def ransac_plane_circle_detection_and_visualization(
             continue
         normal /= np.linalg.norm(normal)
 
-        if median_angles is not None:
-            ang = estimate_angle(normal)
-            if np.any(np.abs(ang - median_angles) > angle_threshold_deg):
+        if median_normal is not None:
+            if normal_pairwise_angle(median_normal, normal) > angle_threshold_deg:
                 continue
 
         d = -normal.dot(p0)
@@ -241,15 +239,21 @@ def construct_plane(inlier_pts, normal, outlier=False):
     plane_meshes.append(mesh_plane)
 
 
-def print_pairwise_normal_angles(blade_normals):
-    normals = np.array(blade_normals, dtype=float)
-    normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+def normal_pairwise_angle(n1, n2):
+    n1 /= np.linalg.norm(n1)
+    n2 /= np.linalg.norm(n2)
 
+    cosine_rad = np.clip(abs(n1.dot(n2)), -1.0, 1.0)
+    angle_deg = np.degrees(np.arccos(cosine_rad))
+
+    return angle_deg
+
+
+def print_pairwise_normal_angles(blade_normals):
     n = normals_unit.shape[0]
     for i in range(n):
         for j in range(i + 1, n):
-            cos_ij = np.clip(abs(normals_unit[i].dot(normals_unit[j])), -1.0, 1.0)
-            angle_deg = np.degrees(np.arccos(cos_ij))
+            angle_deg = normal_pairwise_angle(blade_normals[i], blade_normals[j])
             print(f"Angle between normal {i} and {j}: {angle_deg:.2f}°")
 
 
@@ -278,8 +282,6 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
 
 if __name__ == "__main__":
     for index, blade in enumerate(blades_submeshes):
-        # if index != 1:
-        #     continue
         for submesh in blade:
             inside_mask = submeshes[submesh].contains(drill_pts)
             inside_points = drill_pts[inside_mask]
@@ -295,28 +297,20 @@ if __name__ == "__main__":
             blades_normals[index].append(normal)
 
     for blade_index, blade_normals in enumerate(blades_normals):
-        # if blade_index != 1:
-        #     continue
         outliers_mask, normals_unit = cluster_normals(
             blade_normals, clustering_min_samples
         )
         outlier_indices = np.where(outliers_mask)[0]
-        print(outlier_indices)
 
         if len(outlier_indices):
-            inlier_indices = np.where(outliers_mask ^ 1)[0]
-            inlier_angles = []
-
-            for index in inlier_indices:
-                inlier_angles.append(estimate_angle(normals_unit[index]))
-            median_angles = np.mean(inlier_angles, axis=0)
+            median_normal = np.median(normals_unit[outliers_mask ^ 1], axis=0)
 
             for index in outlier_indices:
                 submesh = blades_submeshes[blade_index][index]
                 inside_mask = submeshes[submesh].contains(drill_pts)
                 inside_points = drill_pts[inside_mask]
                 results = ransac_plane_circle_detection_and_visualization(
-                    inside_points, median_angles=median_angles
+                    inside_points, median_normal=median_normal
                 )
 
                 if not results:
@@ -336,8 +330,6 @@ if __name__ == "__main__":
                 blades_normals[blade_index][cutter_index],
                 outliers_mask[cutter_index],
             )
-
-    print(print_pairwise_normal_angles(blades_normals[1]))
 
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name="All Segmented Planes")
