@@ -9,16 +9,25 @@ import os
 import json
 import random
 
-base_dir = "../dataset/exported_blades_v3/01_02_2024_09_15"
-spheres_mesh_path = os.path.join(base_dir, "merged_blade_mapping_big.obj")
-drill_bit_info = json.load(open(f"{base_dir}/full_drillbit.json"))
+from utils import (
+    split_cutters_array,
+    get_3d_cutters_centers,
+    get_3d_spheres,
+    get_pcd_center,
+)
+
+base_dir = "../dataset/exported_blades_v3/"
+date = "01_02_2024_09_15"
+
+spheres_mesh_path = os.path.join(base_dir, date, "merged_blade_mapping_big.obj")
+drill_bit_info = json.load(os.path.join(base_dir, date, "full_drillbit.json"))
 
 mesh = trimesh.load_mesh(spheres_mesh_path)
 submeshes = mesh.split()
 
 voxel_size = 0.001
-pcd_path = os.path.join(base_dir, "med_scaled.ply")
-mesh_path = os.path.join(base_dir, "med_scaled.obj")
+pcd_path = os.path.join(base_dir, date, "med_scaled.ply")
+mesh_path = os.path.join(base_dir, date, "med_scaled.obj")
 
 drill_bit_pcd = o3d.io.read_point_cloud(pcd_path)
 drill_bit_mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -29,9 +38,9 @@ drill_pts = np.asarray(drill_bit_pcd.points, dtype=np.float32)
 blades_submeshes = [[] for _ in range(len(drill_bit_info.values()))]
 blades_inlier_pts = [[] for _ in range(len(drill_bit_info.values()))]
 blades_normals = [[] for _ in range(len(drill_bit_info.values()))]
+blades_cutter_centers = [[] for _ in range(len(drill_bit_info.values()))]
 
 plane_meshes = []
-
 
 clustering_min_samples = 2
 
@@ -281,6 +290,40 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
 
 
 if __name__ == "__main__":
+    cutter_centers = get_3d_cutters_centers(base_dir, date)
+    cutter_spheres = get_3d_spheres(base_dir, date)
+
+    for blade_index, (_, cutter_locations) in reversed(cutter_centers.items()):
+        for cutter_index, location in enumerate(cutter_locations):
+            cutter_data = []
+            cutter_data.append(*location)
+
+            min_distance = float("inf")
+            sphere_idx = -1
+            for i in range(len(cutter_spheres)):
+                sphere = cutter_spheres[i]
+                sphere_center, sphere_radius = sphere
+                distance = np.linalg.norm(location - sphere_center)
+                if distance < min_distance and distance < sphere_radius:
+                    min_distance = distance
+                    sphere_idx = i
+
+            if sphere_idx != -1:
+                cutter_data.append(*cutter_spheres[sphere_idx][0])
+                cutter_data.append(cutter_spheres[sphere_idx][1])
+                cutter_data.append(blade_index)
+                cutter_data.append(cutter_index)
+
+        blades_cutter_centers[blade_index].append(location)
+
+    pcd_center = get_pcd_center(drill_bit_pcd)
+
+    cutters_unpacked = []
+    for blade_cutters in blades_cutter_centers:
+        cutters_unpacked.append(* blade_cutters)
+
+    main_cutters, double_cutters = split_cutters_array(cutters_unpacked)
+
     for index, blade in enumerate(blades_submeshes):
         for submesh in blade:
             inside_mask = submeshes[submesh].contains(drill_pts)
