@@ -17,10 +17,10 @@ from utils import (
 )
 
 base_dir = "../dataset/exported_blades_v3/"
-date = "01_02_2024_09_15"
+date = "01_02_2024_08_54"
 
 spheres_mesh_path = os.path.join(base_dir, date, "merged_blade_mapping_big.obj")
-drill_bit_info = json.load(os.path.join(base_dir, date, "full_drillbit.json"))
+drill_bit_info = json.load(open(os.path.join(base_dir, date, "full_drillbit.json")))
 
 mesh = trimesh.load_mesh(spheres_mesh_path)
 submeshes = mesh.split()
@@ -38,7 +38,6 @@ drill_pts = np.asarray(drill_bit_pcd.points, dtype=np.float32)
 blades_submeshes = [[] for _ in range(len(drill_bit_info.values()))]
 blades_inlier_pts = [[] for _ in range(len(drill_bit_info.values()))]
 blades_normals = [[] for _ in range(len(drill_bit_info.values()))]
-blades_cutter_centers = [[] for _ in range(len(drill_bit_info.values()))]
 
 plane_meshes = []
 
@@ -51,6 +50,13 @@ for index, value in enumerate(drill_bit_info.values()):
         for i, submesh in enumerate(submeshes):
             if submesh.contains(np.array(coords).reshape(1, 3))[0]:
                 blades_submeshes[index].append(i)
+
+
+count = 0
+for blade_submeshes in blades_submeshes:
+    count += len(blade_submeshes)
+
+print(count)
 
 
 def run_ransac(eroded_points):
@@ -268,6 +274,7 @@ def print_pairwise_normal_angles(blade_normals):
 
 def cluster_normals(blade_normals, clustering_min_samples=2):
     normals = np.array(blade_normals, dtype=float)
+    print(normals)
     normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
 
     ref = normals_unit.mean(axis=0)
@@ -292,11 +299,13 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
 if __name__ == "__main__":
     cutter_centers = get_3d_cutters_centers(base_dir, date)
     cutter_spheres = get_3d_spheres(base_dir, date)
+    pcd_center = get_pcd_center(drill_bit_pcd)
 
-    for blade_index, (_, cutter_locations) in reversed(cutter_centers.items()):
+    for blade_index, (_, cutter_locations) in enumerate(cutter_centers.items()):
+        blade_cutters = []
         for cutter_index, location in enumerate(cutter_locations):
             cutter_data = []
-            cutter_data.append(*location)
+            cutter_data.extend(location)
 
             min_distance = float("inf")
             sphere_idx = -1
@@ -309,23 +318,27 @@ if __name__ == "__main__":
                     sphere_idx = i
 
             if sphere_idx != -1:
-                cutter_data.append(*cutter_spheres[sphere_idx][0])
+                cutter_data.extend(cutter_spheres[sphere_idx][0])
                 cutter_data.append(cutter_spheres[sphere_idx][1])
                 cutter_data.append(blade_index)
                 cutter_data.append(cutter_index)
 
-        blades_cutter_centers[blade_index].append(location)
+            blade_cutters.append(cutter_data)
 
-    pcd_center = get_pcd_center(drill_bit_pcd)
+        main_cutters, double_cutters = split_cutters_array(blade_cutters, pcd_center)
 
-    cutters_unpacked = []
-    for blade_cutters in blades_cutter_centers:
-        cutters_unpacked.append(* blade_cutters)
-
-    main_cutters, double_cutters = split_cutters_array(cutters_unpacked)
+        for double_cutter in double_cutters:
+            blade_index, cutter_index = [int(e) for e in double_cutter]
+            # blades_submeshes[blade_index].pop(
+            #     cutter_index
+            # )  # popping is going to shift the indices...
+            blades_submeshes[blade_index][cutter_index] = -1
 
     for index, blade in enumerate(blades_submeshes):
         for submesh in blade:
+            if submesh == -1:
+                print("skipped")
+                continue
             inside_mask = submeshes[submesh].contains(drill_pts)
             inside_points = drill_pts[inside_mask]
 
@@ -363,7 +376,6 @@ if __name__ == "__main__":
                 hull, inlier_points, normal = max(
                     results, key=lambda x: cv2.contourArea(x[0])
                 )
-                print(estimate_angle(normal))
                 blades_inlier_pts[blade_index][index] = inlier_points
                 blades_normals[blade_index][index] = normal
 
