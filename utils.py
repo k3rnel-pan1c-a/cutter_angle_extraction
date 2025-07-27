@@ -5,59 +5,68 @@ import open3d as o3d
 import json
 import os
 
+from typing import List, Tuple
+
 
 def split_cutters_array(
-    cutters_arr: np.ndarray, db_center: tuple[float, float]
-) -> tuple[np.ndarray, np.ndarray]:
-    cutters = [np.array(cutter, dtype=float) for cutter in cutters_arr]
-    main_cutters = []
-    double_cutters = []
+    cutters_arr: List[List[float]], db_center: Tuple[float, float]
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    
+    cutters = [np.array(row, dtype=float) for row in cutters_arr]
+
+    main_ids = []
+    double_ids = []
+
+    if not cutters:
+        return main_ids, double_ids
 
     cur = min(cutters, key=lambda r: r[2])
 
     while cutters:
         cur = min(cutters, key=lambda r: np.linalg.norm(r[:3] - cur[:3]))
 
-        for index, cutter in enumerate(cutters):
-            if np.array_equal(cutter, cur):
-                cutters.pop(index)
+        for i, row in enumerate(cutters):
+            if np.array_equal(row, cur):
+                cutters.pop(i)
                 break
 
-        main_cutters.append(cur[-2:])
+        blade_id, cutter_id = int(cur[7]), int(cur[8])
+        main_ids.append((blade_id, cutter_id))
 
         xc, yc = db_center[:2]
         zc = cur[2]
         rc = np.linalg.norm(cur[:2] - np.array([xc, yc]))
 
-        for sph in cutters[:]:  # iterate over a shallow copy
-            xs, ys, zs, sr = sph[3], sph[4], sph[5], sph[6]
+        for sph in cutters[:]:
+            xs, ys, zs = sph[3], sph[4], sph[5]
+            rs = sph[6]
 
             plane_distance = abs(zs - zc)
-            if plane_distance > sr:
+            if plane_distance > rs:
                 continue
 
-            if plane_distance == sr:
+            if plane_distance == rs:
                 sphere_circle_radius = 0.0
             else:
                 sphere_circle_radius = np.sqrt(
-                    sr * sr - plane_distance * plane_distance
+                    rs * rs - plane_distance * plane_distance
                 )
 
-            center_distance_2d = np.linalg.norm([xs - xc, ys - yc])
+            center_distance_2d = np.linalg.norm(np.array([xs, ys]) - np.array([xc, yc]))
 
             if (
                 abs(rc - sphere_circle_radius)
                 <= center_distance_2d
                 <= (rc + sphere_circle_radius)
             ):
-                for index, cutter in enumerate(cutters):
-                    if np.array_equal(cutter, cur):
-                        cutters.pop(index)
+                double_ids.append((int(sph[7]), int(sph[8])))
+
+                for j, row2 in enumerate(cutters):
+                    if np.array_equal(row2, sph):
+                        cutters.pop(j)
                         break
 
-                double_cutters.append(sph[-2:])
-
-    return np.array(main_cutters), np.array(double_cutters)
+    return main_ids, double_ids
 
 
 def get_3d_cutters_centers(dataset_root, date: str):
