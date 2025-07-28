@@ -47,6 +47,8 @@ def ransac_plane_circle_detection_and_visualization(
 ):
     N = pts.shape[0]
 
+    distance_thresh *= 0.5
+
     for it in range(iterations):
         idx = random.sample(range(N), 3)
         p0, p1, p2 = pts[idx]
@@ -62,6 +64,7 @@ def ransac_plane_circle_detection_and_visualization(
         dist = np.abs(pts.dot(normal) + d)
         inliers_idx = np.where(dist < distance_thresh)[0]
         if len(inliers_idx) < min_inliers:
+            print("Low inlier points count")
             continue
         inlier_pts = pts[inliers_idx]
 
@@ -126,51 +129,58 @@ def ransac_plane_circle_detection_and_visualization(
 
         binary = cv2.bitwise_not(img)
 
-        contours, hiearchies = cv2.findContours(
-            binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE
-        )
-        if hiearchies is None:
+        nonzero = cv2.findNonZero(binary)
+        if nonzero is None or len(nonzero) < 3:
+            print("A")
             continue
+        pts_px = nonzero.reshape(-1, 2)
+        black_area = pts_px.shape[0]
 
-        hiearchies = hiearchies[0]
+        hull = cv2.convexHull(pts_px)
+        hull_area = cv2.contourArea(hull)
 
-        solid_contours = []
-        for idx, contour in enumerate(contours):
-            next_i, prev_i, first_child, parent = hiearchies[idx]
-
-            if parent != -1 or first_child != -1:
-                continue
-
-            solid_contours.append(contour)
-
-        if solid_contours:
-            areas = [cv2.contourArea(c) for c in solid_contours]
-            biggest = solid_contours[int(np.argmax(areas))]
-            cv2.drawContours(img, [biggest], -1, (128, 0, 0), 1)
-            best_fit_contours.append([biggest, inlier_pts, normal])
+        ratio = black_area / hull_area if hull_area > 0 else 0
+        cv2.drawContours(img, [hull], -1, (128, 0, 0), 1)
 
         big = cv2.resize(
             img,
-            (W * 16, H * 16),
+            (W * 8, H * 8),
             interpolation=cv2.INTER_NEAREST,
         )
         cv2.imshow(f"2D Iter {it}", big)
         if cv2.waitKey(0) & 0xFF == ord("q"):
             cv2.destroyWindow(f"2D Iter {it}")
 
+        if hull_area == 0 or ratio < 0.75:
+            continue
+
+        contours, hiearchies = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        )
+        if hiearchies is None:
+            continue
+
+        if contours:
+            areas = [cv2.contourArea(c) for c in contours]
+            biggest = contours[int(np.argmax(areas))]
+            # cv2.drawContours(img, [biggest], -1, (64, 0, 0), 1)
+
+            best_fit_contours.append([biggest, inlier_pts, normal, big])
+
 
 if __name__ == "__main__":
-    base_dir = "../dataset/exported_blades_v3/01_02_2024_08_31"
+    base_dir = "../dataset/exported_blades_v3/01_02_2024_09_15"
     mesh = trimesh.load_mesh(os.path.join(base_dir, "merged_blade_mapping_big.obj"))
     drill_pts = np.asarray(
         o3d.io.read_point_cloud(os.path.join(base_dir, "med_scaled.ply")).points
     )
-    inside_mask = mesh.split()[6].contains(drill_pts)
+
+    inside_mask = mesh.split()[12].contains(drill_pts)
     inside_pts = drill_pts[inside_mask]
     ransac_plane_circle_detection_and_visualization(inside_pts)
 
     best_fit_contour = max(best_fit_contours, key=lambda c: cv2.contourArea(c[0]))
-    contour, inlier_pts, normal = best_fit_contour
+    contour, inlier_pts, normal, binary_img = best_fit_contour
     mesh_plane = construct_plane(inlier_pts, normal)
 
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inside_pts))
@@ -188,3 +198,7 @@ if __name__ == "__main__":
     opt.mesh_show_back_face = True
     vis.run()
     vis.destroy_window()
+
+    cv2.imshow("binary_img", binary_img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
