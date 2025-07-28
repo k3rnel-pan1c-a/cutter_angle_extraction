@@ -47,8 +47,6 @@ def ransac_plane_circle_detection_and_visualization(
 ):
     N = pts.shape[0]
 
-    distance_thresh *= 0.5
-
     for it in range(iterations):
         idx = random.sample(range(N), 3)
         p0, p1, p2 = pts[idx]
@@ -101,16 +99,13 @@ def ransac_plane_circle_detection_and_visualization(
         inlier_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inlier_pts))
         inlier_pcd.paint_uniform_color([1, 0, 0])
 
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=f"3D Iter {it}", width=800, height=600)
-        vis.add_geometry(pcd)
-        vis.add_geometry(inlier_pcd)
-        vis.add_geometry(mesh_plane)
-
-        opt = vis.get_render_option()
-        opt.mesh_show_back_face = True
-        vis.run()
-        vis.destroy_window()
+        o3d.visualization.draw_geometries(
+            [pcd, inlier_pcd, mesh_plane],
+            window_name=f"3D Iter {it}",
+            width=800,
+            height=600,
+            mesh_show_back_face=True,
+        )
 
         u, v = v1, v2
         coords = np.vstack(
@@ -129,7 +124,11 @@ def ransac_plane_circle_detection_and_visualization(
 
         binary = cv2.bitwise_not(img)
 
-        nonzero = cv2.findNonZero(binary)
+        kernel = np.ones((4, 4), np.uint8)
+        opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        original_opening = cv2.bitwise_not(opening)
+
+        nonzero = cv2.findNonZero(opening)
         if nonzero is None or len(nonzero) < 3:
             print("A")
             continue
@@ -137,25 +136,51 @@ def ransac_plane_circle_detection_and_visualization(
         black_area = pts_px.shape[0]
 
         hull = cv2.convexHull(pts_px)
-        hull_area = cv2.contourArea(hull)
+        hull_mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.drawContours(hull_mask, [hull], -1, 255, thickness=-1)
+        hull_area_pixels = cv2.countNonZero(hull_mask)
+        if hull_area_pixels == 0:
+            continue
 
-        ratio = black_area / hull_area if hull_area > 0 else 0
+        area_ratio = black_area / (W * H) if W * H > 0 else 0
+        solidity = black_area / hull_area_pixels if hull_area_pixels > 0 else 0
+        perimeter = cv2.arcLength(hull, True)
+        circularity = (
+            (4 * np.pi * black_area) / (perimeter * perimeter) if perimeter > 0 else 0
+        )
+
+        if solidity < 0.75 or circularity < 0.5:
+            continue
+
+        area_weight = 4
+
+        total_weight = 1.0 + 1.0 + area_weight
+        score = (solidity + circularity + area_weight * area_ratio) / total_weight
+
         cv2.drawContours(img, [hull], -1, (128, 0, 0), 1)
+        cv2.drawContours(original_opening, [hull], -1, (128, 0, 0), 1)
 
         big = cv2.resize(
-            img,
-            (W * 8, H * 8),
+            np.hstack((original_opening, img)),
+            (W * 10, H * 10),
             interpolation=cv2.INTER_NEAREST,
         )
+        cv2.putText(
+            big,
+            f"Solidity: {solidity:.3f}, Circularity: {circularity:.3f}, area ratio: {area_ratio:.3f}",
+            (10, 30),
+            cv2.FONT_HERSHEY_PLAIN,
+            0.8,
+            (0, 0, 0),
+            1,
+        )
+
         cv2.imshow(f"2D Iter {it}", big)
         if cv2.waitKey(0) & 0xFF == ord("q"):
             cv2.destroyWindow(f"2D Iter {it}")
 
-        if hull_area == 0 or ratio < 0.75:
-            continue
-
         contours, hiearchies = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+            opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
         if hiearchies is None:
             continue
@@ -165,7 +190,7 @@ def ransac_plane_circle_detection_and_visualization(
             biggest = contours[int(np.argmax(areas))]
             # cv2.drawContours(img, [biggest], -1, (64, 0, 0), 1)
 
-            best_fit_contours.append([biggest, inlier_pts, normal, big])
+            best_fit_contours.append([biggest, inlier_pts, normal, big, score])
 
 
 if __name__ == "__main__":
@@ -179,8 +204,8 @@ if __name__ == "__main__":
     inside_pts = drill_pts[inside_mask]
     ransac_plane_circle_detection_and_visualization(inside_pts)
 
-    best_fit_contour = max(best_fit_contours, key=lambda c: cv2.contourArea(c[0]))
-    contour, inlier_pts, normal, binary_img = best_fit_contour
+    best_fit_contour = max(best_fit_contours, key=lambda c: c[-1])
+    contour, inlier_pts, normal, binary_img, score = best_fit_contour
     mesh_plane = construct_plane(inlier_pts, normal)
 
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inside_pts))
