@@ -43,9 +43,21 @@ def construct_plane(inlier_pts, normal):
 
 
 def ransac_plane_circle_detection_and_visualization(
-    pts, distance_thresh=0.001, iterations=100, min_inliers=100, img_scale=600
+    pts,
+    region_half,
+    distance_thresh=0.001,
+    iterations=100,
 ):
     N = pts.shape[0]
+
+    margin = 5
+    min_inliers = 100
+    img_scale = 600
+    min_solidity = 0.85
+
+    canvas_w = canvas_h = int(2 * region_half * img_scale) + 2 * margin
+
+    areas = []
 
     for it in range(iterations):
         idx = random.sample(range(N), 3)
@@ -65,8 +77,6 @@ def ransac_plane_circle_detection_and_visualization(
             print("Low inlier points count")
             continue
         inlier_pts = pts[inliers_idx]
-
-        # mesh_plane = construct_plane(inlier_pts, normal)
 
         point0 = inlier_pts.mean(axis=0)
         arbitrary = np.array([1, 0, 0]) if abs(normal[0]) < 0.9 else np.array([0, 1, 0])
@@ -111,16 +121,18 @@ def ransac_plane_circle_detection_and_visualization(
         coords = np.vstack(
             [(inlier_pts - point0).dot(u), (inlier_pts - point0).dot(v)]
         ).T
-        xs, ys = coords[:, 0], coords[:, 1]
-        xmin, xmax, ymin, ymax = xs.min(), xs.max(), ys.min(), ys.max()
-        W = int(np.ceil((xmax - xmin) * img_scale)) + 10
-        H = int(np.ceil((ymax - ymin) * img_scale)) + 10
-        img = np.ones((H, W), dtype=np.uint8) * 255
-        for x, y in zip(xs, ys):
-            ix = int((x - xmin) * img_scale)
-            iy = int((y - ymin) * img_scale)
-            if 0 <= ix < W and 0 <= iy < H:
-                img[iy + 5, ix + 5] = 0
+
+        us, vs = coords[:, 0], coords[:, 1]
+
+        ix = np.floor((us + region_half) * img_scale).astype(int) + margin
+        iy = np.floor((vs + region_half) * img_scale).astype(int) + margin
+
+        mask = (ix >= 0) & (ix < canvas_w) & (iy >= 0) & (iy < canvas_h)
+        ix, iy = ix[mask], iy[mask]
+
+        img = np.ones((canvas_h, canvas_w), dtype=np.uint8) * 255
+
+        img[iy, ix] = 0
 
         binary = cv2.bitwise_not(img)
 
@@ -130,44 +142,36 @@ def ransac_plane_circle_detection_and_visualization(
 
         nonzero = cv2.findNonZero(opening)
         if nonzero is None or len(nonzero) < 3:
-            print("A")
             continue
         pts_px = nonzero.reshape(-1, 2)
         black_area = pts_px.shape[0]
 
         hull = cv2.convexHull(pts_px)
-        hull_mask = np.zeros((H, W), dtype=np.uint8)
+        hull_mask = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
         cv2.drawContours(hull_mask, [hull], -1, 255, thickness=-1)
         hull_area_pixels = cv2.countNonZero(hull_mask)
         if hull_area_pixels == 0:
             continue
 
-        area_ratio = black_area / (W * H) if W * H > 0 else 0
         solidity = black_area / hull_area_pixels if hull_area_pixels > 0 else 0
-        perimeter = cv2.arcLength(hull, True)
-        circularity = (
-            (4 * np.pi * black_area) / (perimeter * perimeter) if perimeter > 0 else 0
-        )
+        area_ratio = black_area / (canvas_h * canvas_w)
 
-        if solidity < 0.75 or circularity < 0.5:
+        if solidity < min_solidity:
             continue
 
-        area_weight = 4
-
-        total_weight = 1.0 + 1.0 + area_weight
-        score = (solidity + circularity + area_weight * area_ratio) / total_weight
+        areas.append(area_ratio)
 
         cv2.drawContours(img, [hull], -1, (128, 0, 0), 1)
         cv2.drawContours(original_opening, [hull], -1, (128, 0, 0), 1)
 
         big = cv2.resize(
             np.hstack((original_opening, img)),
-            (W * 10, H * 10),
+            (canvas_w * 10, canvas_h * 10),
             interpolation=cv2.INTER_NEAREST,
         )
         cv2.putText(
             big,
-            f"Solidity: {solidity:.3f}, Circularity: {circularity:.3f}, area ratio: {area_ratio:.3f}",
+            f"Solidity: {solidity:.3f}, area ratio: {area_ratio:.3f}",
             (10, 30),
             cv2.FONT_HERSHEY_PLAIN,
             0.8,
@@ -179,18 +183,9 @@ def ransac_plane_circle_detection_and_visualization(
         if cv2.waitKey(0) & 0xFF == ord("q"):
             cv2.destroyWindow(f"2D Iter {it}")
 
-        contours, hiearchies = cv2.findContours(
-            opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-        )
-        if hiearchies is None:
-            continue
+        best_fit_contours.append([inlier_pts, normal, big])
 
-        if contours:
-            areas = [cv2.contourArea(c) for c in contours]
-            biggest = contours[int(np.argmax(areas))]
-            # cv2.drawContours(img, [biggest], -1, (64, 0, 0), 1)
-
-            best_fit_contours.append([biggest, inlier_pts, normal, big, score])
+    return areas 
 
 
 if __name__ == "__main__":
@@ -202,10 +197,24 @@ if __name__ == "__main__":
 
     inside_mask = mesh.split()[12].contains(drill_pts)
     inside_pts = drill_pts[inside_mask]
-    ransac_plane_circle_detection_and_visualization(inside_pts)
 
-    best_fit_contour = max(best_fit_contours, key=lambda c: c[-1])
-    contour, inlier_pts, normal, binary_img, score = best_fit_contour
+    center = inside_pts.mean(axis=0)
+    dists = np.linalg.norm(inside_pts - center, axis=1)
+    region_half = dists.max()
+    region_half *= 1.05
+
+    areas = ransac_plane_circle_detection_and_visualization(
+        inside_pts, region_half
+    )
+
+    areas = np.array(areas)
+    a_min, a_max = areas.min(), areas.max()
+    areas_scaled = (areas - a_min) / ((a_max - a_min) + 1e-8)
+
+    max_index = np.argmax(areas_scaled, axis=0)
+    best_fit_contour = best_fit_contours[max_index]
+
+    inlier_pts, normal, binary_img = best_fit_contour
     mesh_plane = construct_plane(inlier_pts, normal)
 
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inside_pts))
@@ -213,17 +222,14 @@ if __name__ == "__main__":
     inlier_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inlier_pts))
     inlier_pcd.paint_uniform_color([1, 0, 0])
 
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name="Best fit plane", width=800, height=600)
-    vis.add_geometry(pcd)
-    vis.add_geometry(inlier_pcd)
-    vis.add_geometry(mesh_plane)
-
-    opt = vis.get_render_option()
-    opt.mesh_show_back_face = True
-    vis.run()
-    vis.destroy_window()
+    o3d.visualization.draw_geometries(
+        [pcd, inlier_pcd, mesh_plane],
+        window_name="Best fit plane",
+        width=800,
+        height=600,
+        mesh_show_back_face=True,
+    )
 
     cv2.imshow("binary_img", binary_img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    if cv2.waitKey(0) & 0xFF == ord("q"):
+        cv2.destroyWindow("binary_img")
