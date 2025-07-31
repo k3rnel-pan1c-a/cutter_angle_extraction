@@ -17,7 +17,7 @@ from utils import (
 )
 
 base_dir = "../dataset/exported_blades_v3/"
-date = "01_02_2024_08_54"
+date = "01_02_2024_11_11"
 
 spheres_mesh_path = os.path.join(base_dir, date, "merged_blade_mapping_big.obj")
 drill_bit_info = json.load(open(os.path.join(base_dir, date, "full_drillbit.json")))
@@ -139,10 +139,12 @@ def ransac_plane_circle_detection_and_visualization(
         black_area = pts_px.shape[0]
 
         hull = cv2.convexHull(pts_px)
-        hull_area = cv2.contourArea(hull)
-
-        ratio = black_area / hull_area if hull_area > 0 else 0
-        if hull_area == 0 or ratio < 0.75:
+        hull_mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.drawContours(hull_mask, [hull], -1, 255, thickness=-1)
+        hull_area_pixels = cv2.countNonZero(hull_mask)
+        
+        solidity = black_area / hull_area_pixels if hull_area_pixels > 0 else 0
+        if hull_area_pixels == 0 or solidity < 0.8:
             continue
 
         contours, hiearchies = cv2.findContours(
@@ -329,21 +331,20 @@ if __name__ == "__main__":
 
         for double_cutter in double_cutters:
             blade_index, cutter_index = [int(e) for e in double_cutter]
-            # blades_submeshes[blade_index].pop(
-            #     cutter_index
-            # )  # popping is going to shift the indices...
             blades_submeshes[blade_index][cutter_index] = -1
 
     for index, blade in enumerate(blades_submeshes):
+        if index != 0:
+            continue
         for submesh in blade:
             if submesh == -1:
-                print("skipped")
                 continue
             inside_mask = submeshes[submesh].contains(drill_pts)
             inside_points = drill_pts[inside_mask]
 
             results = ransac_plane_circle_detection_and_visualization(inside_points)
             if not results:
+                print(f"Ignored cutter {submesh} as no valid result...")
                 continue
 
             hull, inlier_points, normal = max(
@@ -353,6 +354,8 @@ if __name__ == "__main__":
             blades_normals[index].append(normal)
 
     for blade_index, blade_normals in enumerate(blades_normals):
+        if blade_index != 0:
+            continue
         outliers_mask, normals_unit = cluster_normals(
             blade_normals, clustering_min_samples
         )
