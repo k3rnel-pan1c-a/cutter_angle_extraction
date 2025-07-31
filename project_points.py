@@ -50,12 +50,12 @@ def ransac_plane_circle_detection_and_visualization(
 ):
     N = pts.shape[0]
 
-    margin = 5
-    min_inliers = 100
-    img_scale = 600
-    min_solidity = 0.85
+    MARGIN = 5
+    MIN_INLIERS = 100
+    IMG_SCALE = 600
+    MIN_SOLIDITY = 0.85
 
-    canvas_w = canvas_h = int(2 * region_half * img_scale) + 2 * margin
+    canvas_w = canvas_h = int(2 * region_half * IMG_SCALE) + 2 * MARGIN
 
     areas = []
 
@@ -73,7 +73,7 @@ def ransac_plane_circle_detection_and_visualization(
 
         dist = np.abs(pts.dot(normal) + d)
         inliers_idx = np.where(dist < distance_thresh)[0]
-        if len(inliers_idx) < min_inliers:
+        if len(inliers_idx) < MIN_INLIERS:
             print("Low inlier points count")
             continue
         inlier_pts = pts[inliers_idx]
@@ -124,8 +124,8 @@ def ransac_plane_circle_detection_and_visualization(
 
         us, vs = coords[:, 0], coords[:, 1]
 
-        ix = np.floor((us + region_half) * img_scale).astype(int) + margin
-        iy = np.floor((vs + region_half) * img_scale).astype(int) + margin
+        ix = np.floor((us + region_half) * IMG_SCALE).astype(int) + MARGIN
+        iy = np.floor((vs + region_half) * IMG_SCALE).astype(int) + MARGIN
 
         mask = (ix >= 0) & (ix < canvas_w) & (iy >= 0) & (iy < canvas_h)
         ix, iy = ix[mask], iy[mask]
@@ -156,7 +156,7 @@ def ransac_plane_circle_detection_and_visualization(
         solidity = black_area / hull_area_pixels if hull_area_pixels > 0 else 0
         area_ratio = black_area / (canvas_h * canvas_w)
 
-        if solidity < min_solidity:
+        if solidity < MIN_SOLIDITY:
             continue
 
         areas.append(area_ratio)
