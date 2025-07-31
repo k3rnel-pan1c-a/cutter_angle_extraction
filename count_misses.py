@@ -56,37 +56,65 @@ count = 0
 for blade_submeshes in blades_submeshes:
     count += len(blade_submeshes)
 
-print(count)
+
+def remove_double_cutter():
+    cutter_centers = get_3d_cutters_centers(base_dir, date)
+    cutter_spheres = get_3d_spheres(base_dir, date)
+    pcd_center = get_pcd_center(drill_bit_pcd)
+
+    for blade_index, (_, cutter_locations) in enumerate(cutter_centers.items()):
+        blade_cutters = []
+        for cutter_index, location in enumerate(cutter_locations):
+            cutter_data = []
+            cutter_data.extend(location)
+
+            min_distance = float("inf")
+            sphere_idx = -1
+            for i in range(len(cutter_spheres)):
+                sphere = cutter_spheres[i]
+                sphere_center, sphere_radius = sphere
+                distance = np.linalg.norm(location - sphere_center)
+                if distance < min_distance and distance < sphere_radius:
+                    min_distance = distance
+                    sphere_idx = i
+
+            if sphere_idx != -1:
+                cutter_data.extend(cutter_spheres[sphere_idx][0])
+                cutter_data.append(cutter_spheres[sphere_idx][1])
+                cutter_data.append(blade_index)
+                cutter_data.append(cutter_index)
+
+            blade_cutters.append(cutter_data)
+
+        _, double_cutters = split_cutters_array(blade_cutters, pcd_center)
+
+        for double_cutter in double_cutters:
+            blade_index, cutter_index = [int(e) for e in double_cutter]
+            blades_submeshes[blade_index][cutter_index] = -1
 
 
-def run_ransac(eroded_points):
-    eroded_pcd = o3d.geometry.PointCloud()
-    eroded_pcd.points = o3d.utility.Vector3dVector(eroded_points)
-
-    plane_model, inliers = eroded_pcd.segment_plane(
-        distance_threshold=0.001,
-        ransac_n=5,
-        num_iterations=500,
-    )
-
-    return plane_model, inliers
-
-
-def ransac_plane_circle_detection_and_visualization(
+def ransac_plane_circle_detection(
     pts,
+    region_half,
     distance_thresh=0.001,
-    iterations=2000,
-    min_inliers=100,
-    img_scale=600,
+    iterations=1000,
     median_normal=None,
-    angle_threshold_deg=35,
 ):
-    distance_thresh *= 0.5
+    N = pts.shape[0]
+    MARGIN = 5
+    MIN_INLIERS = 100
+    IMG_SCALE = 600
+    MIN_SOLIDITY = 0.85
+    ANGLE_THRESHOLD = 35
+
+    W = H = int(2 * region_half * IMG_SCALE) + 2 * MARGIN
 
     N = pts.shape[0]
-    best_fit_contours = []
 
-    for it in range(iterations):
+    areas = []
+    models = []
+
+    for _ in range(iterations):
         idx = random.sample(range(N), 3)
         p0, p1, p2 = pts[idx]
 
@@ -98,14 +126,14 @@ def ransac_plane_circle_detection_and_visualization(
         normal /= np.linalg.norm(normal)
 
         if median_normal is not None:
-            if normal_pairwise_angle(median_normal, normal) > angle_threshold_deg:
+            if normal_pairwise_angle(median_normal, normal) > ANGLE_THRESHOLD:
                 continue
 
         d = -normal.dot(p0)
 
         dist = np.abs(pts.dot(normal) + d)
         inliers_idx = np.where(dist < distance_thresh)[0]
-        if len(inliers_idx) < min_inliers:
+        if len(inliers_idx) < MIN_INLIERS:
             continue
         inlier_pts = pts[inliers_idx]
 
@@ -120,19 +148,25 @@ def ransac_plane_circle_detection_and_visualization(
         coords = np.vstack(
             [(inlier_pts - point0).dot(u), (inlier_pts - point0).dot(v)]
         ).T
-        xs, ys = coords[:, 0], coords[:, 1]
-        xmin, xmax, ymin, ymax = xs.min(), xs.max(), ys.min(), ys.max()
-        W = int(np.ceil((xmax - xmin) * img_scale)) + 10
-        H = int(np.ceil((ymax - ymin) * img_scale)) + 10
+
+        us, vs = coords[:, 0], coords[:, 1]
+
+        ix = np.floor((us + region_half) * IMG_SCALE).astype(int) + MARGIN
+        iy = np.floor((vs + region_half) * IMG_SCALE).astype(int) + MARGIN
+
+        mask = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
+        ix, iy = ix[mask], iy[mask]
+
         img = np.ones((H, W), dtype=np.uint8) * 255
-        for x, y in zip(xs, ys):
-            ix = int((x - xmin) * img_scale)
-            iy = int((y - ymin) * img_scale)
-            if 0 <= ix < W and 0 <= iy < H:
-                img[iy + 5, ix + 5] = 0
+
+        img[iy, ix] = 0
 
         binary = cv2.bitwise_not(img)
-        nonzero = cv2.findNonZero(binary)
+
+        kernel = np.ones((4, 4), np.uint8)
+        opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
+        nonzero = cv2.findNonZero(opening)
         if nonzero is None or len(nonzero) < 3:
             continue
         pts_px = nonzero.reshape(-1, 2)
@@ -142,23 +176,49 @@ def ransac_plane_circle_detection_and_visualization(
         hull_mask = np.zeros((H, W), dtype=np.uint8)
         cv2.drawContours(hull_mask, [hull], -1, 255, thickness=-1)
         hull_area_pixels = cv2.countNonZero(hull_mask)
-        
+        if hull_area_pixels == 0:
+            continue
+
         solidity = black_area / hull_area_pixels if hull_area_pixels > 0 else 0
-        if hull_area_pixels == 0 or solidity < 0.8:
+        area_ratio = black_area / (H * W)
+
+        if solidity < MIN_SOLIDITY:
             continue
 
-        contours, hiearchies = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-        )
-        if hiearchies is None:
-            continue
+        areas.append(area_ratio)
+        models.append([inlier_pts, normal])
 
-        hiearchies = hiearchies[0]
+    return areas, models
 
-        if contours:
-            best_fit_contours.append([hull, inlier_pts, normal])
 
-    return best_fit_contours
+def run_ransac(
+    blade_index, submesh_index, inside_pts, cutter_index=None, median_normal=None
+):
+    center = inside_pts.mean(axis=0)
+    dists = np.linalg.norm(inside_pts - center, axis=1)
+    region_half = dists.max()
+    region_half *= 1.05
+
+    areas, models = ransac_plane_circle_detection(
+        inside_pts, region_half, median_normal=median_normal
+    )
+    if not areas:
+        print(f"Ignored cutter {submesh_index} as no valid result...")
+        return None
+
+    areas = np.array(areas)
+
+    a_min, a_max = areas.min(), areas.max()
+    areas_scaled = (areas - a_min) / ((a_max - a_min) + 1e-8)
+
+    inlier_pts, normal = models[np.argmax(areas_scaled, axis=0)]
+
+    if not cutter_index:
+        blades_inlier_pts[blade_index].append(inlier_pts)
+        blades_normals[blade_index].append(normal)
+    else:
+        blades_inlier_pts[blade_index][index] = inlier_pts
+        blades_inlier_pts[blade_index][index] = normal
 
 
 def estimate_angle(normal_vector):
@@ -181,41 +241,6 @@ def estimate_angle(normal_vector):
     angles = np.array([theta_deg_z, theta_deg_y, theta_deg_x])
 
     return angles.astype(int)
-
-
-def erode_cutter(submesh_index, drill_pts, voxel_size=0.001):
-    inside_mask = submeshes[submesh_index].contains(drill_pts)
-    inside_points = drill_pts[inside_mask]
-
-    if len(inside_points) == 0:
-        return
-
-    min_bound = inside_points.min(axis=0)
-    max_bound = inside_points.max(axis=0)
-    dims = np.ceil((max_bound - min_bound) / voxel_size).astype(int)
-
-    A = np.zeros((dims[2], dims[1], dims[0]), dtype=bool)
-
-    indices = np.floor((inside_points - min_bound) / voxel_size).astype(int)
-
-    indices = np.clip(indices, 0, [dims[0] - 1, dims[1] - 1, dims[2] - 1])
-
-    for ix, iy, iz in indices:
-        A[iz, iy, ix] = True
-
-    structure = np.ones((2, 1, 1), dtype=bool)
-    eroded = ndimage.binary_erosion(A, structure=structure, iterations=1)
-
-    eroded_indices = np.argwhere(eroded)
-    eroded_points = eroded_indices[:, [2, 1, 0]] * voxel_size + min_bound
-
-    if len(eroded_points) > 0:
-        plane_model, inliers = run_ransac(eroded_points)
-        inlier_pts = eroded_points[inliers]
-
-        return plane_model, inlier_pts
-    else:
-        return None
 
 
 def construct_plane(inlier_pts, normal, outlier=False):
@@ -299,63 +324,18 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
 
 
 if __name__ == "__main__":
-    cutter_centers = get_3d_cutters_centers(base_dir, date)
-    cutter_spheres = get_3d_spheres(base_dir, date)
-    pcd_center = get_pcd_center(drill_bit_pcd)
+    remove_double_cutter()
 
-    for blade_index, (_, cutter_locations) in enumerate(cutter_centers.items()):
-        blade_cutters = []
-        for cutter_index, location in enumerate(cutter_locations):
-            cutter_data = []
-            cutter_data.extend(location)
-
-            min_distance = float("inf")
-            sphere_idx = -1
-            for i in range(len(cutter_spheres)):
-                sphere = cutter_spheres[i]
-                sphere_center, sphere_radius = sphere
-                distance = np.linalg.norm(location - sphere_center)
-                if distance < min_distance and distance < sphere_radius:
-                    min_distance = distance
-                    sphere_idx = i
-
-            if sphere_idx != -1:
-                cutter_data.extend(cutter_spheres[sphere_idx][0])
-                cutter_data.append(cutter_spheres[sphere_idx][1])
-                cutter_data.append(blade_index)
-                cutter_data.append(cutter_index)
-
-            blade_cutters.append(cutter_data)
-
-        main_cutters, double_cutters = split_cutters_array(blade_cutters, pcd_center)
-
-        for double_cutter in double_cutters:
-            blade_index, cutter_index = [int(e) for e in double_cutter]
-            blades_submeshes[blade_index][cutter_index] = -1
-
-    for index, blade in enumerate(blades_submeshes):
-        if index != 0:
-            continue
-        for submesh in blade:
+    for blade_index, blade in enumerate(blades_submeshes):
+        for cutter_index, submesh in enumerate(blade):
             if submesh == -1:
                 continue
             inside_mask = submeshes[submesh].contains(drill_pts)
-            inside_points = drill_pts[inside_mask]
+            inside_pts = drill_pts[inside_mask]
 
-            results = ransac_plane_circle_detection_and_visualization(inside_points)
-            if not results:
-                print(f"Ignored cutter {submesh} as no valid result...")
-                continue
-
-            hull, inlier_points, normal = max(
-                results, key=lambda x: cv2.contourArea(x[0])
-            )
-            blades_inlier_pts[index].append(inlier_points)
-            blades_normals[index].append(normal)
+            run_ransac(blade_index, submesh, inside_pts)
 
     for blade_index, blade_normals in enumerate(blades_normals):
-        if blade_index != 0:
-            continue
         outliers_mask, normals_unit = cluster_normals(
             blade_normals, clustering_min_samples
         )
@@ -364,23 +344,18 @@ if __name__ == "__main__":
         if len(outlier_indices):
             median_normal = np.median(normals_unit[outliers_mask ^ 1], axis=0)
 
-            for index in outlier_indices:
+            for cutter_index in outlier_indices:
                 submesh = blades_submeshes[blade_index][index]
                 inside_mask = submeshes[submesh].contains(drill_pts)
-                inside_points = drill_pts[inside_mask]
-                results = ransac_plane_circle_detection_and_visualization(
-                    inside_points, median_normal=median_normal
-                )
+                inside_pts = drill_pts[inside_mask]
 
-                if not results:
-                    print("No results for outliers")
-                    continue
-
-                hull, inlier_points, normal = max(
-                    results, key=lambda x: cv2.contourArea(x[0])
+                run_ransac(
+                    blade_index,
+                    submesh,
+                    inside_pts,
+                    cutter_index=cutter_index,
+                    median_normal=median_normal,
                 )
-                blades_inlier_pts[blade_index][index] = inlier_points
-                blades_normals[blade_index][index] = normal
 
         for cutter_index in range(len(blade_normals)):
             construct_plane(
