@@ -2,7 +2,6 @@ import numpy as np
 import cv2
 import trimesh
 import open3d as o3d
-from scipy import ndimage
 from sklearn.cluster import DBSCAN
 
 import os
@@ -17,7 +16,7 @@ from utils import (
 )
 
 base_dir = "../dataset/exported_blades_v3/"
-date = "01_02_2024_11_11"
+date = "04_02_2024_11_47"
 
 spheres_mesh_path = os.path.join(base_dir, date, "merged_blade_mapping_big.obj")
 drill_bit_info = json.load(open(os.path.join(base_dir, date, "full_drillbit.json")))
@@ -41,7 +40,7 @@ blades_normals = [[] for _ in range(len(drill_bit_info.values()))]
 
 plane_meshes = []
 
-clustering_min_samples = 2
+CLUSTERING_MIN_SAMPLES = 3
 
 for index, value in enumerate(drill_bit_info.values()):
     blades_submeshes[index] = []
@@ -97,14 +96,14 @@ def ransac_plane_circle_detection(
     pts,
     region_half,
     distance_thresh=0.001,
-    iterations=1000,
+    iterations=1500,
     median_normal=None,
 ):
     N = pts.shape[0]
     MARGIN = 5
     MIN_INLIERS = 100
     IMG_SCALE = 600
-    MIN_SOLIDITY = 0.85
+    MIN_SOLIDITY = 0.95
     ANGLE_THRESHOLD = 35
 
     W = H = int(2 * region_half * IMG_SCALE) + 2 * MARGIN
@@ -213,12 +212,12 @@ def run_ransac(
 
     inlier_pts, normal = models[np.argmax(areas_scaled, axis=0)]
 
-    if not cutter_index:
+    if cutter_index is None:
         blades_inlier_pts[blade_index].append(inlier_pts)
         blades_normals[blade_index].append(normal)
     else:
-        blades_inlier_pts[blade_index][index] = inlier_pts
-        blades_inlier_pts[blade_index][index] = normal
+        blades_inlier_pts[blade_index][cutter_index] = inlier_pts
+        blades_normals[blade_index][cutter_index] = normal
 
 
 def estimate_angle(normal_vector):
@@ -301,7 +300,6 @@ def print_pairwise_normal_angles(blade_normals):
 
 def cluster_normals(blade_normals, clustering_min_samples=2):
     normals = np.array(blade_normals, dtype=float)
-    print(normals)
     normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
 
     ref = normals_unit.mean(axis=0)
@@ -310,7 +308,7 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
     dots = normals_unit.dot(ref)
     normals_unit[dots < 0] *= -1
 
-    max_angle_deg = 25
+    max_angle_deg = 50
     eps = 1 - np.cos(np.deg2rad(max_angle_deg))
     cl = DBSCAN(eps=eps, min_samples=clustering_min_samples, metric="cosine").fit(
         normals_unit
@@ -327,6 +325,8 @@ if __name__ == "__main__":
     remove_double_cutter()
 
     for blade_index, blade in enumerate(blades_submeshes):
+        # if blade_index != 2:
+        #     continue
         for cutter_index, submesh in enumerate(blade):
             if submesh == -1:
                 continue
@@ -336,16 +336,17 @@ if __name__ == "__main__":
             run_ransac(blade_index, submesh, inside_pts)
 
     for blade_index, blade_normals in enumerate(blades_normals):
+        # if blade_index != 2:
+        #     continue
         outliers_mask, normals_unit = cluster_normals(
-            blade_normals, clustering_min_samples
+            blade_normals, CLUSTERING_MIN_SAMPLES
         )
         outlier_indices = np.where(outliers_mask)[0]
 
         if len(outlier_indices):
             median_normal = np.median(normals_unit[outliers_mask ^ 1], axis=0)
-
             for cutter_index in outlier_indices:
-                submesh = blades_submeshes[blade_index][index]
+                submesh = blades_submeshes[blade_index][cutter_index]
                 inside_mask = submeshes[submesh].contains(drill_pts)
                 inside_pts = drill_pts[inside_mask]
 
@@ -356,7 +357,6 @@ if __name__ == "__main__":
                     cutter_index=cutter_index,
                     median_normal=median_normal,
                 )
-
         for cutter_index in range(len(blade_normals)):
             construct_plane(
                 blades_inlier_pts[blade_index][cutter_index],
@@ -364,14 +364,10 @@ if __name__ == "__main__":
                 outliers_mask[cutter_index],
             )
 
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name="All Segmented Planes")
-    vis.add_geometry(drill_bit_mesh)
-    for mesh in plane_meshes:
-        vis.add_geometry(mesh)
-
-    opt = vis.get_render_option()
-    opt.mesh_show_back_face = True
-
-    vis.run()
-    vis.destroy_window()
+    o3d.visualization.draw_geometries(
+        [drill_bit_mesh, *plane_meshes],
+        window_name="Best fit plane",
+        width=1280,
+        height=720,
+        mesh_show_back_face=True,
+    )
