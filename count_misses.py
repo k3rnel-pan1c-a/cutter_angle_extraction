@@ -16,7 +16,7 @@ from utils import (
 )
 
 base_dir = "../dataset/exported_blades_v3/"
-date = "04_02_2024_11_47"
+date = "04_02_2024_14_24"
 
 spheres_mesh_path = os.path.join(base_dir, date, "merged_blade_mapping_big.obj")
 drill_bit_info = json.load(open(os.path.join(base_dir, date, "full_drillbit.json")))
@@ -191,7 +191,7 @@ def ransac_plane_circle_detection(
 
 
 def run_ransac(
-    blade_index, submesh_index, inside_pts, cutter_index=None, median_normal=None
+    blade_index, submesh_index, inside_pts, cutter_index, median_normal=None
 ):
     center = inside_pts.mean(axis=0)
     dists = np.linalg.norm(inside_pts - center, axis=1)
@@ -206,18 +206,13 @@ def run_ransac(
         return None
 
     areas = np.array(areas)
-
     a_min, a_max = areas.min(), areas.max()
     areas_scaled = (areas - a_min) / ((a_max - a_min) + 1e-8)
 
     inlier_pts, normal = models[np.argmax(areas_scaled, axis=0)]
 
-    if cutter_index is None:
-        blades_inlier_pts[blade_index].append(inlier_pts)
-        blades_normals[blade_index].append(normal)
-    else:
-        blades_inlier_pts[blade_index][cutter_index] = inlier_pts
-        blades_normals[blade_index][cutter_index] = normal
+    blades_inlier_pts[blade_index][cutter_index] = inlier_pts
+    blades_normals[blade_index][cutter_index] = normal
 
 
 def estimate_angle(normal_vector):
@@ -290,16 +285,12 @@ def normal_pairwise_angle(n1, n2):
     return angle_deg
 
 
-def print_pairwise_normal_angles(blade_normals):
-    n = normals_unit.shape[0]
-    for i in range(n):
-        for j in range(i + 1, n):
-            angle_deg = normal_pairwise_angle(blade_normals[i], blade_normals[j])
-            print(f"Angle between normal {i} and {j}: {angle_deg:.2f}°")
-
-
 def cluster_normals(blade_normals, clustering_min_samples=2):
-    normals = np.array(blade_normals, dtype=float)
+    valid_indices = [i for i, n in enumerate(blade_normals) if n is not None]
+    if not valid_indices:
+        return np.ones(len(blade_normals), dtype=bool), np.zeros((0, 3)), np.array([])
+
+    normals = np.array([blade_normals[i] for i in valid_indices], dtype=float)
     normals_unit = normals / np.linalg.norm(normals, axis=1, keepdims=True)
 
     ref = normals_unit.mean(axis=0)
@@ -315,41 +306,55 @@ def cluster_normals(blade_normals, clustering_min_samples=2):
     )
 
     labels = np.array(cl.labels_)
-
     outliers = labels == -1
 
-    return outliers, normals_unit
+    outliers_mask_full = np.ones(len(blade_normals), dtype=bool)
+    for idx_pos, original_idx in enumerate(valid_indices):
+        outliers_mask_full[original_idx] = outliers[idx_pos]
+
+    return outliers_mask_full, normals_unit, labels
 
 
 if __name__ == "__main__":
     remove_double_cutter()
 
     for blade_index, blade in enumerate(blades_submeshes):
-        # if blade_index != 2:
-        #     continue
+        if blade_index != 0:
+            continue
+        blades_inlier_pts[blade_index] = [None] * len(blade)
+        blades_normals[blade_index] = [None] * len(blade)
+
         for cutter_index, submesh in enumerate(blade):
             if submesh == -1:
+                print(
+                    f"Removed double cutter at blade: {blade_index}, cutter: {cutter_index}"
+                )
                 continue
             inside_mask = submeshes[submesh].contains(drill_pts)
             inside_pts = drill_pts[inside_mask]
-
-            run_ransac(blade_index, submesh, inside_pts)
+            run_ransac(blade_index, submesh, inside_pts, cutter_index)
 
     for blade_index, blade_normals in enumerate(blades_normals):
-        # if blade_index != 2:
-        #     continue
-        outliers_mask, normals_unit = cluster_normals(
+        if blade_index != 0:
+            continue
+
+        outliers_mask_full, normals_unit_valid, labels_valid = cluster_normals(
             blade_normals, CLUSTERING_MIN_SAMPLES
         )
-        outlier_indices = np.where(outliers_mask)[0]
+        outlier_indices = np.where(outliers_mask_full)[0]
 
-        if len(outlier_indices):
-            median_normal = np.median(normals_unit[outliers_mask ^ 1], axis=0)
+        non_outlier_mask_valid = labels_valid != -1
+        if non_outlier_mask_valid.sum() > 0:
+            median_normal = np.median(
+                normals_unit_valid[non_outlier_mask_valid], axis=0
+            )
+            median_normal /= np.linalg.norm(median_normal)
             for cutter_index in outlier_indices:
                 submesh = blades_submeshes[blade_index][cutter_index]
+                if submesh == -1:
+                    continue
                 inside_mask = submeshes[submesh].contains(drill_pts)
                 inside_pts = drill_pts[inside_mask]
-
                 run_ransac(
                     blade_index,
                     submesh,
@@ -357,16 +362,22 @@ if __name__ == "__main__":
                     cutter_index=cutter_index,
                     median_normal=median_normal,
                 )
-        for cutter_index in range(len(blade_normals)):
-            construct_plane(
-                blades_inlier_pts[blade_index][cutter_index],
-                blades_normals[blade_index][cutter_index],
-                outliers_mask[cutter_index],
+        else:
+            print(
+                f"blade: {blade_index} has no clustered inliers to define a median normal."
             )
+
+        for cutter_index in range(len(blade_normals)):
+            inlier = blades_inlier_pts[blade_index][cutter_index]
+            normal = blades_normals[blade_index][cutter_index]
+            if inlier is None or normal is None:
+                continue
+            outlier_flag = outliers_mask_full[cutter_index]
+            construct_plane(inlier, normal, outlier=outlier_flag)
 
     o3d.visualization.draw_geometries(
         [drill_bit_mesh, *plane_meshes],
-        window_name="Best fit plane",
+        window_name="Best fit planes",
         width=1280,
         height=720,
         mesh_show_back_face=True,
