@@ -3,10 +3,11 @@ import copy
 import numpy as np
 import os
 import trimesh
+import cv2
+from sklearn.cluster import DBSCAN
 
-
-PATH_SOURCE = "produced_mesh/scaled_pcd.ply"
-PATH_TARGET = "28_01_2024_09_55/model_HD.ply"
+PATH_SOURCE = "produced_mesh/scaled_pcd_dataset.ply"
+PATH_TARGET = "../dataset/exported_blades_v3/28_01_2024_09_55/med_scaled.ply"
 BASE_DIR = "../dataset/exported_blades_v3/28_01_2024_09_55"
 
 
@@ -105,13 +106,13 @@ def refine_registration(source, target, source_fpfh, target_fpfh, voxel_size):
         distance_threshold,
         result_ransac.transformation,
         o3d.pipelines.registration.TransformationEstimationPointToPoint(
-            with_scaling=True
+            with_scaling=False
         ),
     )
     return result
 
 
-voxel_size = 0.05
+voxel_size = 0.005
 source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(
     voxel_size
 )
@@ -127,10 +128,37 @@ draw_registration_result(source, target, result_icp.transformation)
 print(result_icp.transformation)
 
 transformed_source = source.transform(result_icp.transformation)
-transformed_source_pts = transformed_source.points
-
-target_two = o3d.io.read_point_cloud
-target_pts = np.asarray(target.points)
+transformed_source_pts = np.asarray(transformed_source.points)
 
 mesh_path = os.path.join(BASE_DIR, "merged_blade_mapping_big.obj")
 submeshes = trimesh.load_mesh(mesh_path).split()
+
+for submesh in submeshes:
+    mask = submesh.contains(transformed_source_pts)
+    xyz = transformed_source_pts[mask]
+
+    rgb = np.asarray(transformed_source.colors, dtype=np.float32)[mask]
+
+    rgb_u8 = (rgb * 255).astype(np.uint8)
+    hsv = cv2.cvtColor(rgb_u8.reshape(-1, 1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
+    H, S, V = hsv[:, 0], hsv[:, 1], hsv[:, 2]
+
+    green_mask = (H >= 35) & (H <= 85) & (S >= 60) & (V >= 40)
+    # green_pts = xyz[green_mask]
+
+    # if green_pts.size == 0:
+    #     raise ValueError("No green points found with HSV thresholds. Loosen the mask.")
+
+    # # db = DBSCAN(eps=0.008, min_samples=40).fit(green_pts)
+    # # labels = db.labels_
+    # # is_outlier = labels == -1
+
+    green_cloud = o3d.geometry.PointCloud()
+    green_cloud.points = o3d.utility.Vector3dVector(xyz)
+
+    colors = np.zeros((len(xyz), 3), dtype=np.float32)
+    colors[green_mask] = [0.0, 1.0, 0.0]
+    colors[~green_mask] = [0.7, 0.7, 0.7]
+    green_cloud.colors = o3d.utility.Vector3dVector(colors)
+
+    o3d.visualization.draw_geometries([green_cloud])
